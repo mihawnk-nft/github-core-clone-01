@@ -3,7 +3,8 @@
 
 import type { ServerResponse } from 'node:http';
 
-const JSON_TYPE = 'application/json; charset=utf-8';
+/** The JSON content type used by every JSON reply. */
+export const JSON_TYPE = 'application/json; charset=utf-8';
 
 let requestCounter = 0;
 

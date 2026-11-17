@@ -458,8 +458,8 @@ export interface Issue {
   readonly createdSeq: number;
   updatedSeq: number;
   comments: IssueComment[];
-  /** Cached serialised REST body; cleared on any change. */
-  jsonCache: string | null;
+  /** Cached serialised REST body as UTF-8 bytes; cleared on any change. */
+  jsonCache: Buffer | null;
 }
 
 export interface Label {

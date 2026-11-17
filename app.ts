@@ -17,45 +17,47 @@ import { errorBody, sendBytes, sendJson } from './http.ts';
 /** The largest request body accepted (a git pack can be many megabytes). */
 const MAX_BODY_BYTES = 128 * 1024 * 1024;
 
-/** The token the env hands this process; empty when it is not set (local testing). */
-function expectedToken(): string {
-  return process.env.MAKEFUN_SHOP_TOKEN ?? '';
-}
+/** The token the env hands this process; read once at module load (not per request). */
+const EXPECTED_TOKEN = process.env.MAKEFUN_SHOP_TOKEN ?? '';
 
 function bearerToken(req: IncomingMessage): string | null {
   const header = req.headers.authorization;
   if (typeof header !== 'string') return null;
-  const match = /^Bearer (.+)$/.exec(header.trim());
-  return match === null ? null : match[1]!;
+  const trimmed = header.trim();
+  if (!trimmed.startsWith('Bearer ')) return null;
+  return trimmed.slice('Bearer '.length);
 }
 
 /** True when the request carries the env's token (any non-empty Bearer when unset). */
 function authorized(req: IncomingMessage): boolean {
-  const expected = expectedToken();
   const token = bearerToken(req);
   if (token === null || token === '') return false;
-  if (expected === '') return true;
-  return token === expected;
+  if (EXPECTED_TOKEN === '') return true;
+  return token === EXPECTED_TOKEN;
 }
 
-function pathOf(req: IncomingMessage): string {
+/** The request path and query, parsed from a single `new URL` per request. */
+function parseUrl(req: IncomingMessage): { path: string; query: URLSearchParams } {
   try {
-    return new URL(req.url ?? '/', 'http://entry').pathname;
+    const url = new URL(req.url ?? '/', 'http://entry');
+    return { path: url.pathname, query: url.searchParams };
   } catch {
-    return '/';
-  }
-}
-
-function queryOf(req: IncomingMessage): URLSearchParams {
-  try {
-    return new URL(req.url ?? '/', 'http://entry').searchParams;
-  } catch {
-    return new URLSearchParams();
+    return { path: '/', query: new URLSearchParams() };
   }
 }
 
 /** Read the whole request body (a Buffer), or null when it is too large. */
 function readBody(req: IncomingMessage): Promise<Buffer | null> {
+  // Fast path: a request with no Content-Length and no chunked encoding has no body.
+  // Skip attaching stream listeners (the common case for GET/DELETE and empty POSTs).
+  const contentLength = req.headers['content-length'];
+  const transferEncoding = req.headers['transfer-encoding'];
+  if (
+    (contentLength === undefined || contentLength === '0') &&
+    (transferEncoding === undefined || transferEncoding === '')
+  ) {
+    return Promise.resolve(Buffer.alloc(0));
+  }
   return new Promise((resolve) => {
     const chunks: Buffer[] = [];
     let size = 0;
@@ -89,6 +91,8 @@ function splitPath(path: string): string[] {
 
 function decodeSegments(segments: readonly string[]): string[] {
   return segments.map((segment) => {
+    // Fast path: no percent-escape means the segment is already decoded.
+    if (!segment.includes('%')) return segment;
     try {
       return decodeURIComponent(segment);
     } catch {
@@ -100,15 +104,14 @@ function decodeSegments(segments: readonly string[]): string[] {
 /** Build the server. It binds nothing until the caller listens; the entry listens on an ephemeral port. */
 export function createApp(): Server {
   const store = new Store();
-  if (expectedToken() === '') {
+  if (EXPECTED_TOKEN === '') {
     process.stderr.write('[entry] MAKEFUN_SHOP_TOKEN is not set: any non-empty Bearer token is accepted (local testing only)\n');
   }
 
   return createServer((req: IncomingMessage, res: ServerResponse) => {
     void (async () => {
       const method = req.method ?? 'GET';
-      const path = pathOf(req);
-      const query = queryOf(req);
+      const { path, query } = parseUrl(req);
       const host = req.headers.host ?? 'entry';
 
       // The env's boot check calls this twice: 200 {"ok":true}, no auth.
@@ -127,10 +130,9 @@ export function createApp(): Server {
         const owner = decodeURIComponent(gitMatch[1]!);
         const repoName = decodeURIComponent(gitMatch[2]!);
         const service = gitMatch[3]!;
-        const headers: Record<string, string> = {};
-        for (const [key, value] of Object.entries(req.headers)) {
-          if (typeof value === 'string') headers[key.toLowerCase()] = value;
-        }
+        // Node already lowercases incoming header names, so req.headers is usable as-is;
+        // the git handlers only read 'git-protocol'.
+        const headers = req.headers as Record<string, string>;
         if (service === 'info/refs') {
           if (method !== 'GET') {
             sendJson(res, 404, errorBody('Not Found'));

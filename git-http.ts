@@ -547,7 +547,10 @@ export function handleReceivePack(
   const contentType = 'application/x-git-receive-pack-result';
 
   // The command list is pkt-lines up to the first flush; the rest is the pack.
+  // Decode ONCE: the packets from the first pass are reused for the commands,
+  // instead of re-decoding the command section a second time.
   let flushIndex = -1;
+  const commandPackets: Array<{ kind: string; payload: Buffer }> = [];
   try {
     const packets = decodePktLines(body, { allowTrailing: true });
     let offset = 0;
@@ -557,21 +560,19 @@ export function handleReceivePack(
         flushIndex = offset + 4;
         break;
       }
+      if (packet.kind === 'data') commandPackets.push(packet);
       offset += rawLength;
     }
     if (flushIndex < 0) throw new Error('no flush packet after the command list');
   } catch (err) {
     return { status: 400, json: { message: `malformed receive-pack request: ${(err as Error).message}` } };
   }
-  const commandBytes = body.subarray(0, flushIndex - 4);
   const packBytes = body.subarray(flushIndex);
 
   const commands: Array<{ oldOid: string; newOid: string; ref: string }> = [];
   let requestedSideband = false;
   try {
-    const packets = decodePktLines(commandBytes);
-    for (const packet of packets) {
-      if (packet.kind !== 'data') continue;
+    for (const packet of commandPackets) {
       const text = packet.payload.toString('utf8');
       const nul = text.indexOf('\u0000');
       const line = nul >= 0 ? text.slice(0, nul) : text;

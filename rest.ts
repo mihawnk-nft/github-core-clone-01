@@ -22,7 +22,7 @@ import {
   type Repo,
   type Store,
 } from './store.ts';
-import { errorBody, sendJson, sendJsonText, sendStatus } from './http.ts';
+import { errorBody, JSON_TYPE, sendBytes, sendJson, sendStatus } from './http.ts';
 
 export interface RestContext {
   /** The store this server owns. */
@@ -81,10 +81,9 @@ function repoJson(repo: Repo): Record<string, unknown> {
   };
 }
 
-/** The issue body GitHub returns. Serialised once per issue and cached (the read workload). */
-function issueJson(repo: Repo, issue: Issue): string {
-  if (issue.jsonCache !== null) return issue.jsonCache;
-  const text = `${JSON.stringify({
+/** The issue body GitHub returns, as a plain object (shared by the list path). */
+function issueObject(repo: Repo, issue: Issue): Record<string, unknown> {
+  return {
     id: issue.id,
     number: issue.number,
     title: issue.title,
@@ -92,9 +91,19 @@ function issueJson(repo: Repo, issue: Issue): string {
     state: issue.state,
     labels: issue.labels.map((name) => ({ name, color: repo.labels.get(name)?.color ?? 'ededed' })),
     user: userJson(),
-  })}\n`;
-  issue.jsonCache = text;
-  return text;
+  };
+}
+
+/**
+ * The issue body serialised once per issue and cached as UTF-8 bytes (the read workload).
+ * Sending the cached Buffer skips the per-request JSON.stringify, byteLength scan and
+ * UTF-8 re-encode of the string form.
+ */
+function issueJsonBuffer(repo: Repo, issue: Issue): Buffer {
+  if (issue.jsonCache !== null) return issue.jsonCache;
+  const buffer = Buffer.from(`${JSON.stringify(issueObject(repo, issue))}\n`, 'utf8');
+  issue.jsonCache = buffer;
+  return buffer;
 }
 
 function pullJson(pull: PullRequest, repo: Repo, store: Store): Record<string, unknown> {
@@ -472,7 +481,8 @@ export function handleRest(ctx: RestContext): void {
             return direction === 'asc' ? byCreated : -byCreated;
           });
           const { page, headers } = paginate(issues, ctx, `/api/v3/repos/${VIEWER.login}/${repo.name}/issues`);
-          return sendJson(res, 200, page.map((i) => JSON.parse(issueJson(repo, i))), headers);
+          // Build the objects directly; the old stringify-then-parse round-trip is gone.
+          return sendJson(res, 200, page.map((i) => issueObject(repo, i)), headers);
         }
         if (method === 'POST') {
           if (ctx.bodyInvalid) return badRequest(res);
@@ -485,7 +495,7 @@ export function handleRest(ctx: RestContext): void {
           const unknown = labelNames.find((name) => !repo.labels.has(name));
           if (unknown !== undefined) return unprocessable(res, `Validation Failed: label ${unknown} does not exist`);
           const issue = ctx.store.createIssue(repo, title, typeof body.body === 'string' ? body.body : '', labelNames);
-          return sendJsonText(res, 201, issueJson(repo, issue));
+          return sendBytes(res, 201, issueJsonBuffer(repo, issue), JSON_TYPE);
         }
         return notFound(res);
       }
@@ -494,7 +504,7 @@ export function handleRest(ctx: RestContext): void {
       const issue = repo.issues.get(issueNumber);
       if (rest.length === 2) {
         if (issue === undefined) return notFound(res);
-        if (method === 'GET') return sendJsonText(res, 200, issueJson(repo, issue));
+        if (method === 'GET') return sendBytes(res, 200, issueJsonBuffer(repo, issue), JSON_TYPE);
         if (method === 'PATCH') {
           if (ctx.bodyInvalid) return badRequest(res);
           const body = (ctx.body ?? {}) as Record<string, unknown>;
@@ -503,7 +513,7 @@ export function handleRest(ctx: RestContext): void {
           if (body.state === 'open' || body.state === 'closed') issue.state = body.state;
           issue.updatedSeq = ++ctx.store.seq;
           issue.jsonCache = null;
-          return sendJsonText(res, 200, issueJson(repo, issue));
+          return sendBytes(res, 200, issueJsonBuffer(repo, issue), JSON_TYPE);
         }
         return notFound(res);
       }

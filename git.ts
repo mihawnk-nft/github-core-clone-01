@@ -37,6 +37,9 @@ export type Packet =
   | { kind: 'delim' }
   | { kind: 'response-end' };
 
+/** The 4-hex-digit packet-line length header, compiled once (not per call). */
+const HEX4 = /^[0-9a-fA-F]{4}$/;
+
 /**
  * Decode a complete buffer into packets. Throws on a malformed header or a truncated
  * packet. `allowTrailing` stops before raw (unframed) trailing bytes instead of throwing.
@@ -45,7 +48,6 @@ export function decodePktLines(bytes: Uint8Array, options: { allowTrailing?: boo
   const buffer = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes);
   const packets: Packet[] = [];
   let offset = 0;
-  const HEX4 = /^[0-9a-fA-F]{4}$/;
   while (offset < buffer.length) {
     if (offset + 4 > buffer.length) {
       throw new Error(`truncated pkt-line: ${buffer.length - offset} trailing byte(s)`);
